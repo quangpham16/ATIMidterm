@@ -1,6 +1,9 @@
 fastapi
 uvicorn[standard]
-anthropic
+openai
 python-dotenv
 pydantic
 openpyxl
+httpx
+python-multipart
+PyYAML

@@ -1,0 +1,33 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run AI Test Case API",
+			"type": "shell",
+			"command": ".venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"uvicorn",
+				"app.main:app",
+				"--reload"
+			],
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		},
+		{
+			"label": "Start FastAPI backend",
+			"type": "shell",
+			"command": ".venv\\Scripts\\python.exe",
+			"args": [
+				"-m",
+				"uvicorn",
+				"app.main:app",
+				"--reload"
+			],
+			"isBackground": true,
+			"problemMatcher": [],
+			"group": "build"
+		}
+	]
+}
