@@ -1,6 +1,23 @@
+# Local configuration
 .env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
 venv/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Installed frontend dependencies and generated builds
+node_modules/
+dist/
+
+# Local data and verification output
 *.db
+*.db-shm
+*.db-wal
 data/
-*.db
+test-results/
+.tmp-*/
