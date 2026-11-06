@@ -118,6 +118,64 @@ class GenerationApiTests(unittest.TestCase):
         self.assertIn("sut.add(2, 3)", python_export.text)
         self.assertIn('filename="test_generated.py"', python_export.headers["content-disposition"])
 
+    def test_invalid_generated_python_is_repaired_before_saving_and_exporting(self):
+        original_api_cases = self.suite["api_test_cases"]
+        original_unit_cases = [{"id": "UNIT-ADD-001", "title": "Adds numbers", "api_method": "UNIT", "expected_result": "Returns their sum"}]
+        self.suite.update({"unit_test_cases": original_unit_cases, "unit_test_code": "def test_add(:"})
+        first_response = self.provider_response()
+        corrected_code = "import source_under_test as sut\n\ndef test_add():\n    assert sut.add(2, 3) == 5\n"
+        self.suite = {"api_test_cases": [], "unit_test_cases": [], "unit_test_code": corrected_code}
+        self.urlopen.side_effect = [first_response, self.provider_response()]
+
+        response = self.client.post(
+            "/testcases/generate", headers=self.headers,
+            files={"swagger_file": ("example.json", json.dumps(self.spec), "application/json")},
+            data={"source_code": "def add(a, b): return a + b"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.urlopen.call_count, 2)
+        payload = response.json()
+        self.assertEqual(payload["api_test_cases"][0]["id"], original_api_cases[0]["id"])
+        self.assertEqual(payload["unit_test_cases"][0]["id"], original_unit_cases[0]["id"])
+        saved = self.client.get(f"/testcases/{payload['id']}", headers=self.headers).json()
+        self.assertEqual(saved["unit_test_code"], payload["unit_test_code"])
+        self.assertEqual(len(self.client.get("/testcases/history", headers=self.headers).json()), 1)
+        exported = self.client.get(f"/exports/{payload['id']}.py", headers=self.headers)
+        compile(exported.text, "test_generated.py", "exec")
+        self.assertIn("sut.add(2, 3)", exported.text)
+        self.assertIn("def test_api_", exported.text)
+        self.assertNotIn("def test_add(:", exported.text)
+
+    def test_persistently_invalid_generated_python_is_not_saved(self):
+        self.suite = {
+            "api_test_cases": [],
+            "unit_test_cases": [{"id": "UNIT-ADD-001", "title": "Adds numbers", "expected_result": "Returns their sum"}],
+            "unit_test_code": "def test_add(:",
+        }
+        self.urlopen.return_value = self.provider_response()
+        response = self.client.post("/testcases/generate", data={"source_code": "def add(a, b): return a + b"}, headers=self.headers)
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("invalid syntax", response.json()["detail"])
+        self.assertIn("Automatic repair failed after 2 attempts", response.json()["detail"])
+        self.assertEqual(self.urlopen.call_count, 3)
+        self.assert_nothing_saved()
+
+    def test_repair_that_drops_real_source_calls_is_not_saved(self):
+        self.suite = {
+            "api_test_cases": [],
+            "unit_test_cases": [{"id": "UNIT-ADD-001", "title": "Adds numbers", "expected_result": "Returns their sum"}],
+            "unit_test_code": "def test_add(:",
+        }
+        first_response = self.provider_response()
+        self.suite["unit_test_code"] = "def test_fake():\n    assert True\n"
+        self.urlopen.side_effect = [first_response, self.provider_response(), self.provider_response()]
+        response = self.client.post("/testcases/generate", data={"source_code": "def add(a, b): return a + b"}, headers=self.headers)
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("did not call the source module", response.json()["detail"])
+        self.assertEqual(self.urlopen.call_count, 3)
+        self.assert_nothing_saved()
+
     def test_pasted_typescript_download_keeps_language_after_database_save(self):
         self.suite = {
             "api_test_cases": [],

@@ -1,5 +1,9 @@
 import json
 import unittest
+import os
+from unittest.mock import patch
+
+import httpx
 
 from app.schemas import TestCase as GeneratedCase
 from app.services.exporter import export_result
@@ -21,7 +25,7 @@ class FakeGemini:
                     "test_type": "positive",
                     "prerequisites": [],
                     "request_data": {},
-                    "steps": ["Mock GET /users"],
+                    "steps": ["Send GET /users"],
                     "expected_result": "Users are returned",
                     "expected_status_code": 200,
                 }
@@ -33,7 +37,8 @@ def test_generate_test_cases_returns_pytest_code():
     result = generate_test_cases({"openapi": "3.0.0", "paths": {}}, "def handler(): pass", FakeGemini())
     assert isinstance(result.test_cases[0], GeneratedCase)
     assert "def test_api_tc_001" in result.pytest_code
-    assert "Mock" in result.pytest_code
+    assert "_cf_httpx.Client" in result.pytest_code
+    assert "return_value.status_code" not in result.pytest_code
 
 
 def test_exports_are_available_in_required_formats():
@@ -47,12 +52,25 @@ def test_exports_are_available_in_required_formats():
 
 
 class GeneratorRegressionTests(unittest.TestCase):
-    def test_generated_api_code_executes_with_mocks(self):
+    def test_generated_api_code_exercises_http_and_detects_wrong_status(self):
         test_generate_test_cases_returns_pytest_code()
         result = generate_test_cases({"openapi": "3.0.0", "paths": {}}, "", FakeGemini())
         namespace = {}
         exec(compile(result.pytest_code, "test_generated.py", "exec"), namespace)
-        namespace["test_api_tc_001"]()
+        client_class = httpx.Client
+        requests = []
+        status = [200]
+        def respond(request):
+            requests.append(request)
+            return httpx.Response(status[0], json=[])
+        with patch.dict(os.environ, {"API_BASE_URL": "https://staging.example.test/api"}), patch.object(
+            httpx, "Client", side_effect=lambda **kwargs: client_class(transport=httpx.MockTransport(respond), **kwargs)
+        ):
+            namespace["test_api_tc_001"]()
+            self.assertEqual(str(requests[0].url), "https://staging.example.test/api/users")
+            status[0] = 500
+            with self.assertRaises(AssertionError):
+                namespace["test_api_tc_001"]()
 
     def test_export_formats(self):
         test_exports_are_available_in_required_formats()

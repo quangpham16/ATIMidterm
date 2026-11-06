@@ -1,0 +1,75 @@
+"""Generated API tests. Configure API_BASE_URL before running with pytest.
+
+Optional: API_BEARER_TOKEN, API_HEADERS_JSON, API_TIMEOUT_SECONDS (default 15).
+Requests that change data require API_ALLOW_MUTATIONS=true.
+"""
+import json as _cf_json
+import os as _cf_os
+import re as _cf_re
+from datetime import datetime as _cf_datetime, timedelta as _cf_timedelta, timezone as _cf_timezone
+from urllib.parse import quote as _cf_quote, urlsplit as _cf_urlsplit
+
+import httpx as _cf_httpx
+import pytest as _cf_pytest
+
+API_TEST_CASES = __CASE_FOUNDRY_CASES__
+
+
+def _cf_dates(value):
+    if isinstance(value, dict):
+        return {k: _cf_dates(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_cf_dates(v) for v in value]
+    if isinstance(value, str):
+        today = _cf_datetime.now(_cf_timezone.utc).date()
+        return _cf_re.sub(r"\{\{today([+-]\d+d)?\}\}", lambda m: (today + _cf_timedelta(days=int(m[1][:-1]) if m[1] else 0)).isoformat(), value)
+    return value
+
+
+def _cf_run_case(case):
+    base = _cf_os.environ.get("API_BASE_URL", "").rstrip("/")
+    parsed = _cf_urlsplit(base)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        _cf_pytest.fail("Set API_BASE_URL to the staging API URL, including any API path prefix")
+    method = case["api_method"].upper()
+    if method not in ("GET", "HEAD", "OPTIONS") and _cf_os.environ.get("API_ALLOW_MUTATIONS", "false").lower() != "true":
+        _cf_pytest.skip("Set API_ALLOW_MUTATIONS=true to allow requests that change staging data")
+    data = _cf_dates(case["request"])
+    endpoint = case["endpoint"]
+    for name in _cf_re.findall(r"\{([^{}]+)\}", endpoint):
+        endpoint = endpoint.replace("{" + name + "}", _cf_quote(str(data["path_params"].get(name, "")), safe=""))
+    try:
+        configured_headers = _cf_json.loads(_cf_os.environ.get("API_HEADERS_JSON", "{}"))
+        if not isinstance(configured_headers, dict) or any(not isinstance(v, str) for v in configured_headers.values()):
+            raise ValueError()
+        headers = _cf_httpx.Headers(configured_headers)
+    except (ValueError, TypeError):
+        _cf_pytest.fail("API_HEADERS_JSON must be a JSON object containing string header values")
+    token = _cf_os.environ.get("API_BEARER_TOKEN")
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    headers.update({k: str(v) for k, v in data["headers"].items()})
+    query = dict(data["query_params"])
+    if data["auth_mode"] in ("missing", "invalid"):
+        for name in case["security_headers"]:
+            if data["auth_mode"] == "missing":
+                headers.pop(name, None)
+            else:
+                headers[name] = "Bearer invalid-generated-token" if name.lower() == "authorization" else "invalid-generated-key"
+        for name in case["security_query"]:
+            if data["auth_mode"] == "missing":
+                query.pop(name, None)
+            else:
+                query[name] = "invalid-generated-key"
+    try:
+        timeout = float(_cf_os.environ.get("API_TIMEOUT_SECONDS", "15"))
+        if not 0 < timeout <= 300:
+            raise ValueError()
+    except ValueError:
+        _cf_pytest.fail("API_TIMEOUT_SECONDS must be greater than zero and at most 300")
+    with _cf_httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
+        response = client.request(method, base + "/" + endpoint.lstrip("/"), params=query, headers=headers, json=data["body"])
+    assert response.status_code == case["expected_status_code"], (
+        f"{case['id']}: expected HTTP {case['expected_status_code']}, received {response.status_code}. "
+        f"Expected behaviour: {case['expected_result']}"
+    )

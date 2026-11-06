@@ -20,7 +20,9 @@ def fake_client(code=PYTHON_TESTS):
 
 class SourceGenerationTests(unittest.TestCase):
     def test_python_export_calls_the_real_source_and_detects_broken_behaviour(self):
-        result = generate_test_cases({}, PYTHON_SOURCE, fake_client())
+        client = fake_client()
+        result = generate_test_cases({}, PYTHON_SOURCE, client)
+        client.generate_json.assert_called_once()
         self.assertEqual(result.api_test_cases, [])
         self.assertEqual(result.unit_test_framework, "pytest")
         self.assertEqual(result.unit_pytest_code, result.unit_test_code)
@@ -46,8 +48,83 @@ class SourceGenerationTests(unittest.TestCase):
             generate_test_cases({}, PYTHON_SOURCE, fake_client(""))
 
     def test_generated_code_must_be_valid_python(self):
+        client = fake_client("def test_broken(:")
         with self.assertRaisesRegex(RuntimeError, "invalid Python test code"):
-            generate_test_cases({}, PYTHON_SOURCE, fake_client("def test_broken(:"))
+            generate_test_cases({}, PYTHON_SOURCE, client)
+        self.assertEqual(client.generate_json.call_count, 3)
+
+    def test_invalid_generated_python_is_repaired_without_replacing_the_cases(self):
+        broken = "# generated\n" * 21 + "import source_under_test as sut\n\ndef test_add(:\n    assert sut.add(2, 3) == 5\n"
+        client = fake_client(broken)
+        client.generate_json.side_effect = [
+            client.generate_json.return_value,
+            {"api_test_cases": [], "unit_test_cases": [], "unit_test_code": PYTHON_TESTS},
+        ]
+
+        result = generate_test_cases({}, PYTHON_SOURCE, client)
+
+        self.assertEqual(client.generate_json.call_count, 2)
+        repair_prompt = client.generate_json.call_args.args[0]
+        self.assertIn(PYTHON_SOURCE.strip(), repair_prompt)
+        self.assertIn("line 24", repair_prompt)
+        self.assertIn("invalid syntax", repair_prompt)
+        self.assertIn("UNIT-ADD-001", repair_prompt)
+        self.assertIn(broken, repair_prompt)
+        self.assertEqual([case.id for case in result.unit_test_cases], ["UNIT-ADD-001"])
+        self.assertNotIn("def test_add(:", result.unit_test_code)
+        module = types.ModuleType("source_under_test")
+        exec(PYTHON_SOURCE, module.__dict__)
+        with patch.dict(sys.modules, {"source_under_test": module}):
+            namespace = {}
+            exec(compile(result.pytest_code, "test_generated.py", "exec"), namespace)
+            namespace["test_add_positive"]()
+            namespace["test_add_negative"]()
+
+    def test_second_repair_uses_the_latest_code_and_error(self):
+        client = fake_client("def test_add(:")
+        second_code = "import source_under_test as sut\nBROKEN = f'value }'\n\ndef test_add():\n    assert sut.add(2, 3) == 5\n"
+        client.generate_json.side_effect = [
+            client.generate_json.return_value,
+            {"api_test_cases": [], "unit_test_cases": [], "unit_test_code": second_code},
+            {"api_test_cases": [], "unit_test_cases": [], "unit_test_code": PYTHON_TESTS},
+        ]
+        result = generate_test_cases({}, PYTHON_SOURCE, client)
+        self.assertEqual(client.generate_json.call_count, 3)
+        last_prompt = client.generate_json.call_args.args[0]
+        self.assertIn(second_code, last_prompt)
+        self.assertIn("line 2", last_prompt)
+        self.assertNotIn("def test_add(:", last_prompt)
+        compile(result.pytest_code, "test_generated.py", "exec")
+        self.assertEqual([case.id for case in result.unit_test_cases], ["UNIT-ADD-001"])
+
+    def test_missing_generated_code_can_be_repaired(self):
+        client = fake_client(None)
+        client.generate_json.side_effect = [
+            client.generate_json.return_value,
+            {"api_test_cases": [], "unit_test_cases": [], "unit_test_code": PYTHON_TESTS},
+        ]
+        result = generate_test_cases({}, PYTHON_SOURCE, client)
+        self.assertIn("sut.add(2, 3)", result.unit_test_code)
+
+    def test_python_that_parses_but_cannot_compile_is_not_exported(self):
+        client = fake_client("import source_under_test as sut\nreturn 1\n\ndef test_add():\n    assert sut.add(2, 3) == 5\n")
+        with self.assertRaisesRegex(RuntimeError, "outside function"):
+            generate_test_cases({}, PYTHON_SOURCE, client)
+        self.assertEqual(client.generate_json.call_count, 3)
+
+    def test_repair_transport_failure_is_reported_without_further_generation(self):
+        client = fake_client("def test_broken(:")
+        client.generate_json.side_effect = [client.generate_json.return_value, RuntimeError("Gemini API returned HTTP 503")]
+        with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
+            generate_test_cases({}, PYTHON_SOURCE, client)
+        self.assertEqual(client.generate_json.call_count, 2)
+
+    def test_malformed_repair_response_is_reported_as_an_upstream_failure(self):
+        client = fake_client("def test_broken(:")
+        client.generate_json.side_effect = [client.generate_json.return_value, []]
+        with self.assertRaisesRegex(RuntimeError, "repair response"):
+            generate_test_cases({}, PYTHON_SOURCE, client)
+        self.assertEqual(client.generate_json.call_count, 2)
 
     def test_tests_that_only_assert_a_mock_are_rejected(self):
         tautology = "from unittest.mock import Mock\n\ndef test_fake():\n    dependency = Mock(return_value=5)\n    assert dependency() == 5\n"
@@ -83,6 +160,21 @@ class SourceGenerationTests(unittest.TestCase):
     def test_wrong_language_code_is_not_exported_as_javascript(self):
         with self.assertRaisesRegex(RuntimeError, "did not import the source module"):
             generate_test_cases({}, "export function add(a, b) { return a + b; }", fake_client(), "javascript")
+
+    def test_wrong_language_code_can_be_repaired_as_vitest(self):
+        for language, extension in [("javascript", "js"), ("typescript", "ts")]:
+            with self.subTest(language=language):
+                code = f"import {{ it, expect }} from 'vitest';\nimport {{ add }} from './source_under_test.{extension}';\nit('adds', () => {{ expect(add(2, 3)).toBe(5); }});\n"
+                client = fake_client()
+                client.generate_json.side_effect = [
+                    client.generate_json.return_value,
+                    {"api_test_cases": [], "unit_test_cases": [], "unit_test_code": code},
+                ]
+                result = generate_test_cases({}, "export function add(a, b) { return a + b; }", client, language)
+                self.assertEqual(client.generate_json.call_count, 2)
+                self.assertEqual(result.pytest_code, "")
+                self.assertIn(code.strip(), result.unit_test_code)
+                self.assertEqual(result.unit_test_framework, "Vitest")
 
     def test_prompt_preserves_user_placeholders_and_requests_real_target_calls(self):
         prompt = build_generation_prompt({}, "def label(): return '{module} {language}'", "python")

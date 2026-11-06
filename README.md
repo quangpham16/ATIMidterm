@@ -2,6 +2,23 @@
 
 Generate API test cases from OpenAPI files and unit tests from pasted code, with private accounts, saved suites, and projects.
 
+## Generate, download and run tests
+
+Upload an OpenAPI file or paste source code, generate and review your cases, then
+download Python, JavaScript/TypeScript, JSON or CSV from the saved suite. Run the
+downloaded test code in your own environment or CI. No GitHub connection or app
+registration is required.
+
+See [Running downloaded tests](docs/running-downloaded-tests.md) for commands and
+configuration. JSON and CSV contain case data; use the matching code download to
+execute tests.
+
+Downloaded API tests make actual HTTP requests when run with pytest. Configure
+`API_BASE_URL` and optional `API_BEARER_TOKEN` / `API_HEADERS_JSON`. Requests that
+change data require `API_ALLOW_MUTATIONS=true`. The web app does not execute these
+requests during generation. This repository's own CI continues to mock external
+services.
+
 ## Automatic checks on GitHub
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push, pull request, merge-queue update, and manual workflow run.

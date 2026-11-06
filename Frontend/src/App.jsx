@@ -422,7 +422,9 @@ function Workspace({ token, user, logout, onSessionExpired }) {
           <details className="test-instructions"><summary>How to run these tests</summary><p>Save your original code as <code>{sourceFileName}</code> beside the downloaded test file{codeExtension !== "py" ? " and export the functions or classes under test" : ""}. Install {codeExtension === "py" ? "pytest" : "Vitest"} and your code’s dependencies, then run <code>{testCommand}</code>.</p></details>
           <pre aria-label="Generated unit test code">{unitCode}</pre>
         </div>}
-        {apiCases.length > 0 && <div className="result-block"><div className="block-head"><h3>API / contract tests</h3><span>{apiCases.length} {apiCases.length === 1 ? "case" : "cases"}</span></div><pre>{JSON.stringify(apiCases, null, 2)}</pre></div>}
+        {apiCases.length > 0 && <div className="result-block"><div className="block-head"><h3>API / contract tests</h3><span>{apiCases.length} {apiCases.length === 1 ? "case" : "cases"}</span></div>
+          <details className="test-instructions"><summary>How to run downloaded API tests</summary><p>Download Python, then install pytest and httpx. Set <code>API_BASE_URL</code> to your API URL, including its path prefix, and optionally set <code>API_BEARER_TOKEN</code> or <code>API_HEADERS_JSON</code>. Run <code>python -m pytest test_generated.py</code>. Requests that change data require <code>API_ALLOW_MUTATIONS=true</code>.</p><pre aria-label="Generated API test code">{result.pytest_code}</pre></details>
+          <pre>{JSON.stringify(apiCases, null, 2)}</pre></div>}
         {unitCases.length > 0 && <div className="result-block"><div className="block-head"><h3>Unit test cases</h3><span>{unitCases.length} {unitCases.length === 1 ? "case" : "cases"}</span></div><pre>{JSON.stringify(unitCases, null, 2)}</pre></div>}
       </section>}
       </div>

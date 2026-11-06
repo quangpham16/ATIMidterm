@@ -1,53 +1,30 @@
 import ast
-from pprint import pformat
 import re
 from typing import Any, Protocol
 
 from pydantic import ValidationError
 
 from app.schemas import GenerationResult, TestCase
-from app.services.prompt_builder import build_generation_prompt
+from app.services.api_tests import build_api_pytest_code
+from app.services.prompt_builder import build_generation_prompt, build_unit_test_repair_prompt
 
 
 class JsonLLMClient(Protocol):
     def generate_json(self, prompt: str) -> dict[str, Any]: ...
 
 
-def _safe_name(value: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_]+", "_", value.lower()).strip("_") or "case"
-
-
-def _api_pytest_code(test_cases: list[TestCase]) -> str:
-    serialized = pformat([case.model_dump() for case in test_cases], sort_dicts=False)
-    functions = []
-    for case in test_cases:
-        name = _safe_name(case.id)
-        expected = repr(case.expected_status_code)
-        functions.append(
-            f'''\n\ndef test_api_{name}():
-    api_client = Mock()
-    api_client.request.return_value.status_code = {expected}
-    response = api_client.request({case.api_method!r}, {case.endpoint!r}, json={case.request_data!r})
-    assert response.status_code == {expected}
-'''
-        )
-    return f'''"""Generated API tests. Network calls are mocked by design."""
-from unittest.mock import Mock
-
-API_TEST_CASES = {serialized}
-{''.join(functions)}
-'''
-
-
 def _validate_unit_code(raw: Any, source_language: str) -> str:
     if not isinstance(raw, str) or not raw.strip():
-        raise RuntimeError("Gemini returned unit cases without runnable test code. Please generate again.")
+        raise RuntimeError("Gemini returned unit cases without runnable test code.")
     code = re.sub(r"^```(?:python|py|javascript|js|typescript|ts)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE).strip()
     if source_language == "python":
         try:
             tree = ast.parse(code)
+            # Parsing alone accepts invalid contexts such as a top-level return.
+            # Compilation checks these without executing the generated code.
+            compile(tree, "test_generated.py", "exec")
         except SyntaxError as exc:
-            raise RuntimeError(f"Gemini returned invalid Python test code at line {exc.lineno}. Please generate again.") from exc
+            raise RuntimeError(f"Gemini returned invalid Python test code at line {exc.lineno}, column {exc.offset}: {exc.msg}.") from exc
         aliases = {
             name.asname or name.name
             for node in ast.walk(tree) if isinstance(node, ast.Import)
@@ -63,14 +40,39 @@ def _validate_unit_code(raw: Any, source_language: str) -> str:
                 if isinstance(target, ast.Name) and target.id in aliases:
                     calls_source = True
         if not has_tests or not calls_source:
-            raise RuntimeError("Gemini's tests did not call the source module. Please generate again.")
+            raise RuntimeError("Gemini's tests did not call the source module.")
         instructions = "# Save your original source as source_under_test.py beside this file.\n# Install pytest, then run: python -m pytest test_generated.py\n\n"
     else:
         extension = "ts" if source_language == "typescript" else "js"
         if not re.search(r"from\s+['\"]\./source_under_test(?:\.(?:js|ts))?['\"]", code) or not re.search(r"\b(?:it|test)\s*(?:\.\w+\s*)?\(", code):
-            raise RuntimeError("Gemini's tests did not import the source module or define tests. Please generate again.")
+            raise RuntimeError("Gemini's tests did not import the source module or define tests.")
         instructions = f"// Save your source as source_under_test.{extension} and export the targets under test.\n// Install vitest, then run: npx vitest run test_generated.test.{extension}\n\n"
     return instructions + code + "\n"
+
+
+def _unit_code_with_repair(
+    raw: dict[str, Any], unit_cases: list[TestCase], generation_prompt: str,
+    source_language: str, llm_client: JsonLLMClient,
+) -> str:
+    code = raw.get("unit_test_code", raw.get("unit_pytest_code"))
+    for _ in range(2):
+        try:
+            return _validate_unit_code(code, source_language)
+        except RuntimeError as exc:
+            repair_prompt = build_unit_test_repair_prompt(
+                generation_prompt, [case.model_dump() for case in unit_cases], code, str(exc)
+            )
+
+        # Keep the original cases and use the latest file/error for each repair.
+        # Transport errors propagate instead of triggering more generation.
+        repaired = llm_client.generate_json(repair_prompt)
+        if not isinstance(repaired, dict):
+            raise RuntimeError("Gemini returned an invalid unit-test repair response. Please generate again.")
+        code = repaired.get("unit_test_code", repaired.get("unit_pytest_code"))
+    try:
+        return _validate_unit_code(code, source_language)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{exc} Automatic repair failed after 2 attempts. Please generate again.") from exc
 
 
 def _parse_cases(raw: Any, key: str) -> list[TestCase]:
@@ -112,7 +114,8 @@ def generate_test_cases(
         except SyntaxError as exc:
             raise ValueError(f"Python source has a syntax error at line {exc.lineno}: {exc.msg}. Check the code or select its language.") from exc
 
-    raw = llm_client.generate_json(build_generation_prompt(swagger, source_code, source_language))
+    generation_prompt = build_generation_prompt(swagger, source_code, source_language)
+    raw = llm_client.generate_json(generation_prompt)
     if not isinstance(raw, dict):
         raise ValueError("Gemini returned an invalid response object")
 
@@ -130,8 +133,8 @@ def generate_test_cases(
     if unit_cases and not source_code.strip():
         raise RuntimeError("Gemini returned unit tests without source code. Please generate again.")
 
-    api_code = _api_pytest_code(api_cases) if api_cases else ""
-    unit_code = _validate_unit_code(raw.get("unit_test_code", raw.get("unit_pytest_code")), source_language) if unit_cases else ""
+    api_code = build_api_pytest_code(api_cases, swagger) if api_cases else ""
+    unit_code = _unit_code_with_repair(raw, unit_cases, generation_prompt, source_language, llm_client) if unit_cases else ""
     unit_python = unit_code if source_language == "python" else ""
     combined = "\n\n".join(part for part in (api_code, unit_python) if part)
     return GenerationResult(
