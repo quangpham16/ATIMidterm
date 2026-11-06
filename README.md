@@ -1,4 +1,4 @@
-# Case Foundry
+# Test Case Gen
 
 Generate API test cases from OpenAPI files and unit tests from pasted code, with private accounts, saved suites, and projects.
 
