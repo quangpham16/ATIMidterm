@@ -13,6 +13,9 @@ See [Running downloaded tests](docs/running-downloaded-tests.md) for commands an
 configuration. JSON and CSV contain case data; use the matching code download to
 execute tests.
 
+The frontend has URLs for sign-in, registration, projects, and saved suites. See
+[Frontend routing](docs/routing.md) for routes, direct links, and hosting setup.
+
 Downloaded API tests make actual HTTP requests when run with pytest. Configure
 `API_BASE_URL` and optional `API_BEARER_TOKEN` / `API_HEADERS_JSON`. Requests that
 change data require `API_ALLOW_MUTATIONS=true`. The web app does not execute these

@@ -56,6 +56,16 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/projects/{project['id']}", headers=self.headers(self.other)).status_code, 404)
         self.assertEqual(self.client.get("/testcases/history", params={"project_id": project["id"]}, headers=self.headers(self.other)).status_code, 404)
 
+    def test_project_list_returns_the_complete_array_beyond_twenty_projects(self):
+        for number in range(25):
+            database.create_project(f"project-{number}", self.owner["user"]["id"], f"Project {number}")
+        database.create_project("foreign-project", self.other["user"]["id"], "Private project")
+        response = self.client.get("/projects", headers=self.headers(self.owner))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json(), list)
+        self.assertEqual(len(response.json()), 25)
+        self.assertNotIn("foreign-project", [item["id"] for item in response.json()])
+
     def test_duplicate_names_are_case_insensitive_within_one_account(self):
         self.create()
         response = self.client.post("/projects", json={"name": " TASK MANAGER "}, headers=self.headers(self.owner))

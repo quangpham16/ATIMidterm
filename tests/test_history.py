@@ -40,6 +40,15 @@ class SavedSuiteTests(unittest.TestCase):
         self.assertEqual(response.json()[0]["title"], "Python unit tests")
         self.assertIn("created_at", response.json()[0])
 
+    def test_history_returns_the_complete_array_beyond_twenty_suites(self):
+        for number in range(24):
+            database.save_result(f"suite-{number}", self.result, self.owner["user"]["id"])
+        response = self.client.get("/testcases/history", headers=self.headers(self.owner))
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json(), list)
+        self.assertEqual(len(response.json()), 25)
+        self.assertNotIn("other-suite", [item["id"] for item in response.json()])
+
     def test_opening_saved_suite_restores_cases_code_and_metadata(self):
         response = self.client.get("/testcases/owner-suite", headers=self.headers(self.owner))
         self.assertEqual(response.status_code, 200)
