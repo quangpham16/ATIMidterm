@@ -31,6 +31,8 @@ class GenerationResult(BaseModel):
     unit_test_code: str = ""
     source_language: Literal["python", "javascript", "typescript"] = "python"
     unit_test_framework: str = ""
+    source_files: dict[str, str] = Field(default_factory=dict)
+    source_entrypoint: str = ""
 
 
 class ExportResponse(BaseModel):

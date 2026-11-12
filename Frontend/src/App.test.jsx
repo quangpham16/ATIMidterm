@@ -39,7 +39,11 @@ async function backend(path, options = {}) {
     return Object.values(suites).filter((item) => !projectId || item.project_id === projectId);
   }
   if (path === "/testcases/generate") {
-    const saved = { ...fixture, id: "generated-suite", project_id: options.body.get("project_id") || null };
+    const sourceFiles = Object.fromEntries(options.body.getAll("source_files").map((file) => [file.name, "# uploaded source"]));
+    const saved = {
+      ...fixture, id: "generated-suite", project_id: options.body.get("project_id") || null,
+      ...(Object.keys(sourceFiles).length ? { source_files: sourceFiles, source_entrypoint: options.body.get("source_entrypoint"), source_language: "python" } : {}),
+    };
     suites[saved.id] = saved;
     return saved;
   }
@@ -189,6 +193,112 @@ test("generation keeps the routed project and opens the saved-suite URL", async 
   expectUrl("/suites/generated-suite");
   const [, options] = request.mock.calls.find(([path]) => path === "/testcases/generate");
   expect(options.body.get("project_id")).toBe("project-1");
+});
+
+test("Python uploads accumulate and submit the selected module in multipart data", async () => {
+  mount("/projects/project-1");
+  const filesInput = await screen.findByLabelText("Python source files");
+  fireEvent.change(filesInput, { target: { files: [new File(["def helper(): return 42"], "helpers.py")] } });
+  fireEvent.change(filesInput, { target: { files: [new File(["from helpers import helper"], "service.py")] } });
+  expect(screen.getByLabelText("Module to test").value).toBe("helpers.py");
+  fireEvent.change(screen.getByLabelText("Module to test"), { target: { value: "service.py" } });
+  expect(screen.getByLabelText("Source code").disabled).toBe(true);
+  expect(screen.getByLabelText("Source language").disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "Generate unit tests" }));
+  expect(filesInput.disabled).toBe(true);
+  expect(screen.getByLabelText("Module to test").disabled).toBe(true);
+  expect(screen.getByRole("button", { name: "Remove helpers.py" }).disabled).toBe(true);
+  await screen.findByRole("heading", { name: "Generated tests" });
+  expectUrl("/suites/generated-suite");
+  const [, options] = request.mock.calls.find(([path]) => path === "/testcases/generate");
+  expect(options.body.getAll("source_files").map((file) => file.name)).toEqual(["helpers.py", "service.py"]);
+  expect(options.body.get("source_entrypoint")).toBe("service.py");
+  expect(options.body.get("source_language")).toBe("python");
+  expect(options.body.has("source_code")).toBe(false);
+  expect(options.body.get("project_id")).toBe("project-1");
+  expect(screen.getByRole("button", { name: "Python bundle (.zip)" })).toBeDefined();
+});
+
+test("removing Python files updates the entry module and new-suite clears the remaining files", async () => {
+  mount();
+  fireEvent.change(await screen.findByLabelText("Python source files"), { target: { files: [new File(["# main"], "main.py"), new File(["# helper"], "helpers.py")] } });
+  fireEvent.click(screen.getByRole("button", { name: "Remove main.py" }));
+  expect(screen.getByLabelText("Module to test").value).toBe("helpers.py");
+  expect(screen.queryByRole("button", { name: "Remove main.py" })).toBeNull();
+  fireEvent.click(screen.getByRole("link", { name: "New test suite" }));
+  expect(screen.queryByRole("list", { name: "Selected Python files" })).toBeNull();
+  expect(screen.queryByLabelText("Module to test")).toBeNull();
+  expect(screen.getByLabelText("Source code").disabled).toBe(false);
+  expect(screen.getByLabelText("Source language").disabled).toBe(false);
+  expect(screen.getByRole("button", { name: "Generate test suite" }).disabled).toBe(true);
+});
+
+test("Python files cannot overwrite duplicate names or discard pasted code", async () => {
+  mount();
+  const sourceInput = await screen.findByLabelText("Source code");
+  const filesInput = screen.getByLabelText("Python source files");
+  fireEvent.change(sourceInput, { target: { value: "def answer(): return 42" } });
+  fireEvent.change(filesInput, { target: { files: [new File(["# replacement"], "main.py")] } });
+  expect(screen.getByRole("alert").textContent).toContain("Your pasted code has been kept");
+  expect(sourceInput.value).toBe("def answer(): return 42");
+  expect(screen.queryByLabelText("Module to test")).toBeNull();
+  fireEvent.change(sourceInput, { target: { value: "" } });
+  fireEvent.change(filesInput, { target: { files: [new File(["# original"], "main.py")] } });
+  fireEvent.change(filesInput, { target: { files: [new File(["# replacement"], "MAIN.py")] } });
+  expect(screen.getByRole("alert").textContent).toContain("already selected");
+  expect(screen.getByLabelText("Module to test").options).toHaveLength(1);
+  expect(screen.getByLabelText("Module to test").value).toBe("main.py");
+});
+
+test.each([
+  ["not-python.js", "not supported"],
+  ["bad-module.py", "not supported"],
+  ["class.py", "not supported"],
+  ["test_generated.py", "reserved"],
+  ["PYTEST.py", "reserved"],
+  ["__main__.py", "reserved"],
+])("invalid upload %s is rejected without adding it", async (filename, message) => {
+  mount();
+  fireEvent.change(await screen.findByLabelText("Python source files"), { target: { files: [new File(["# source"], filename)] } });
+  expect(screen.getByRole("alert").textContent).toContain(message);
+  expect(screen.queryByLabelText("Module to test")).toBeNull();
+});
+
+test.each([
+  [() => Array.from({ length: 21 }, (_, index) => new File(["# source"], `module_${index}.py`)), "at most 20"],
+  [() => [new File(["x".repeat(128 * 1024 + 1)], "main.py")], "128 KiB per-file"],
+  [() => Array.from({ length: 5 }, (_, index) => new File(["x".repeat(110 * 1024)], `module_${index}.py`)), "512 KiB total"],
+])("Python uploads enforce their count and size limits", async (makeFiles, message) => {
+  mount();
+  fireEvent.change(await screen.findByLabelText("Python source files"), { target: { files: makeFiles() } });
+  expect(screen.getByRole("alert").textContent).toContain(message);
+  expect(screen.queryByLabelText("Module to test")).toBeNull();
+});
+
+test("restoring a saved Python bundle offers ZIP download with original module instructions", async () => {
+  suites[fixture.id] = { ...fixture, source_language: "python", source_files: { "service.py": "from helpers import answer", "helpers.py": "def answer(): return 42" }, source_entrypoint: "service.py" };
+  const first = mount("/suites/first-suite");
+  await screen.findByRole("heading", { name: "Generated tests" });
+  first.unmount();
+  mount("/suites/first-suite");
+  const zipButton = await screen.findByRole("button", { name: "Python bundle (.zip)" });
+  expect(screen.getByText(/Module under test:/).textContent).toContain("service.py");
+  expect(screen.getByText(/Keep the original module filenames/).textContent).toContain("extract it");
+  expect(screen.queryByText(/Save your original code as/)).toBeNull();
+  const createObjectURL = vi.fn(() => "blob:test-suite");
+  const revokeObjectURL = vi.fn();
+  vi.stubGlobal("URL", class extends URL {
+    static createObjectURL = createObjectURL;
+    static revokeObjectURL = revokeObjectURL;
+  });
+  const fetchMock = vi.fn(async () => ({ ok: true, blob: async () => new Blob(["zip"]) }));
+  vi.stubGlobal("fetch", fetchMock);
+  const linkClick = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  fireEvent.click(zipButton);
+  await waitFor(() => expect(linkClick).toHaveBeenCalledOnce());
+  expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/exports/first-suite.zip"), { headers: { Authorization: "Bearer test-session" } });
+  expect(linkClick.mock.instances[0].download).toBe("test-suite.zip");
+  expect(revokeObjectURL).toHaveBeenCalledWith("blob:test-suite");
 });
 
 test("deleting a suite replaces its route with its project editor", async () => {

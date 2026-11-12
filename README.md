@@ -1,17 +1,28 @@
 # Test Case Gen
 
-Generate API test cases from OpenAPI files and unit tests from pasted code, with private accounts, saved suites, and projects.
+Generate API test cases from OpenAPI files and unit tests from pasted code or Python source files, with private accounts, saved suites, and projects.
 
 ## Generate, download and run tests
 
-Upload an OpenAPI file or paste source code, generate and review your cases, then
-download Python, JavaScript/TypeScript, JSON or CSV from the saved suite. Run the
+Upload an OpenAPI file, paste source code, or select related Python modules and
+choose the module to test. Generate and review your cases, then download Python,
+JavaScript/TypeScript, JSON or CSV from the saved suite. Python file uploads also
+include a ZIP download containing the original modules and generated tests. Run the
 downloaded test code in your own environment or CI. No GitHub connection or app
 registration is required.
 
 See [Running downloaded tests](docs/running-downloaded-tests.md) for commands and
 configuration. JSON and CSV contain case data; use the matching code download to
 execute tests.
+
+Python uploads keep their original filenames so imports between modules work.
+Choose up to 20 flat `.py` files (128 KiB each, 512 KiB total); filenames must be
+ASCII module names using letters, digits and underscores, with no leading digit,
+such as `helpers.py`; `test_generated.py`, `pytest.py`, and
+`__main__.py` are reserved by the test runner.
+Use either pasted source or source files in one suite. An OpenAPI file can be
+included with either input. Extract the ZIP and run the tests locally; uploaded
+source is not executed by the web app.
 
 The frontend has URLs for sign-in, registration, projects, and saved suites. See
 [Frontend routing](docs/routing.md) for routes, direct links, and hosting setup.
