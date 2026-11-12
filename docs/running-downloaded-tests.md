@@ -1,6 +1,7 @@
 # Running downloaded tests
 
-1. Sign in to Case Foundry and upload an OpenAPI JSON/YAML file or paste source code.
+1. Sign in to Case Foundry and upload an OpenAPI JSON/YAML file, paste source code,
+   or select related Python source files and choose the module to test.
 2. Generate and review the test cases and code.
 3. Download the matching code file from the saved suite. JSON and CSV downloads
    contain case descriptions and data for review.
@@ -50,6 +51,38 @@ The Python file embeds its case data. Editing the JSON/CSV download alone does
 not change the executable tests; update the Python data or generate a fresh suite.
 
 ## Python unit tests
+
+### Uploaded Python files
+
+Select your entry module and any Python modules it imports. Use flat `.py` module
+filenames, such as `service.py` and `helpers.py`, without folders. Filenames must
+use ASCII letters, digits and underscores, cannot start with a digit, and cannot
+be Python keywords; `test_generated.py`,
+`pytest.py`, and `__main__.py` are reserved by the test runner. Select at most
+20 files, each at most 128 KiB, and at most 512 KiB
+in total. Adding files preserves earlier selections; remove a file before
+uploading a replacement with the same name. Filenames must also be distinct
+without regard to case, for compatibility with Windows.
+
+Use either uploaded Python files or pasted source in a suite. You can include an
+OpenAPI file with either. The selected entry module is the main target for unit
+tests; other uploaded modules provide context for its imports.
+
+Download **Python bundle (.zip)** from the saved suite and extract it. The bundle
+contains your source files with their original names, `test_generated.py`, and
+run instructions. Keep those names and files together. From the extracted folder:
+
+```powershell
+python -m pip install pytest
+python -m pytest test_generated.py -q
+```
+
+Install any third-party packages your source imports as well. If the suite also
+contains API tests, install httpx and set the API variables described above.
+Case Foundry generates the tests without executing your uploaded source. Review
+the code before running it locally or in CI.
+
+### Pasted Python code
 
 Download **Python** as `test_generated.py`. Save your original source beside it as
 `source_under_test.py`. Install pytest and your source code's dependencies:

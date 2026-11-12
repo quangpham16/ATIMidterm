@@ -4,6 +4,27 @@ import { API_URL, ApiError, request, TOKEN_KEY } from "./api.js";
 import { normalizeSuite } from "./test-suites.js";
 import { projectPath, returnPath, suitePath } from "./routes.js";
 
+const PYTHON_KEYWORDS = new Set("False None True and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield".split(" "));
+
+function sourceFilesError(files) {
+  if (files.length > 20) return "Choose at most 20 Python files.";
+  const names = new Set();
+  let totalSize = 0;
+  for (const item of files) {
+    const stem = item.name.slice(0, -3);
+    if (item.webkitRelativePath || !item.name.endsWith(".py") || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(stem) || PYTHON_KEYWORDS.has(stem)) {
+      return `Use flat Python module filenames such as helpers.py; ${item.name} is not supported.`;
+    }
+    const name = item.name.toLowerCase();
+    if (["test_generated.py", "pytest.py", "__main__.py"].includes(name)) return `${item.name} is reserved by the test runner. Rename your source file.`;
+    if (names.has(name)) return `A source file named ${item.name} is already selected. Remove it before adding a replacement.`;
+    if (item.size > 128 * 1024) return `${item.name} exceeds the 128 KiB per-file limit.`;
+    names.add(name);
+    totalSize += item.size;
+  }
+  return totalSize > 512 * 1024 ? "The selected Python files exceed the 512 KiB total limit." : "";
+}
+
 function Icon({ name, size = 20 }) {
   const paths = {
     plus: <path d="M12 5v14M5 12h14" />,
@@ -200,9 +221,12 @@ function Workspace({ token, user, logout, onSessionExpired }) {
   const resultRef = useRef(null);
   const errorRef = useRef(null);
   const fileInputRef = useRef(null);
+  const sourceFilesInputRef = useRef(null);
   const composerRef = useRef(null);
   const sourceInputRef = useRef(null);
   const [sourceLanguage, setSourceLanguage] = useState("python");
+  const [sourceFiles, setSourceFiles] = useState([]);
+  const [sourceEntrypoint, setSourceEntrypoint] = useState("");
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState("");
@@ -379,11 +403,33 @@ function Workspace({ token, user, logout, onSessionExpired }) {
 
   function resetEditor() {
     setResult(null); setFile(null); setSourceCode(""); setSourceLanguage("python");
+    setSourceFiles([]); setSourceEntrypoint("");
     setError(""); setOperationMessage(""); setSidebarOpen(false);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    if (sourceFilesInputRef.current) sourceFilesInputRef.current.value = "";
     window.scrollTo({ top: 0, behavior: "instant" });
     requestAnimationFrame(() => newSuiteHeadingRef.current?.focus({ preventScroll: true }));
     if (location.pathname !== editorPath) navigate(editorPath);
+  }
+
+  function addSourceFiles(incoming) {
+    if (busy || !incoming.length) return;
+    if (sourceCode.trim()) return setError("Clear the pasted source code before adding Python files. Your pasted code has been kept.");
+    const nextFiles = [...sourceFiles, ...incoming];
+    const validationError = sourceFilesError(nextFiles);
+    if (validationError) return setError(validationError);
+    setSourceFiles(nextFiles);
+    setSourceEntrypoint(sourceEntrypoint || nextFiles[0].name);
+    setSourceLanguage("python");
+    setError("");
+  }
+
+  function removeSourceFile(name) {
+    if (busy) return;
+    const remaining = sourceFiles.filter((item) => item.name !== name);
+    setSourceFiles(remaining);
+    if (sourceEntrypoint === name) setSourceEntrypoint(remaining[0]?.name || "");
+    setError("");
   }
 
   async function deleteSuite() {
@@ -408,9 +454,17 @@ function Workspace({ token, user, logout, onSessionExpired }) {
   async function generate(event) {
     event.preventDefault();
     if (busy) return;
-    if (!file && !sourceCode.trim()) return setError("Add an OpenAPI file or paste source code to begin.");
+    if (!file && !sourceCode.trim() && !sourceFiles.length) return setError("Add an OpenAPI file, paste source code, or select Python files to begin.");
+    if (sourceFiles.length && sourceCode.trim()) return setError("Use either pasted source code or Python files for a suite, then generate again.");
+    const validationError = sourceFilesError(sourceFiles);
+    if (validationError) return setError(validationError);
     const body = new FormData(); if (file) body.append("swagger_file", file);
     if (sourceCode.trim()) { body.append("source_code", sourceCode); body.append("source_language", sourceLanguage); }
+    if (sourceFiles.length) {
+      sourceFiles.forEach((item) => body.append("source_files", item));
+      body.append("source_entrypoint", sourceEntrypoint);
+      body.append("source_language", "python");
+    }
     if (selectedProjectId) body.append("project_id", selectedProjectId);
     setLoading(true); setError(""); setResult(null); setOperationMessage("");
     try {
@@ -425,6 +479,8 @@ function Workspace({ token, user, logout, onSessionExpired }) {
   const unitCode = result?.unit_test_code || result?.unit_pytest_code || "";
   const codeExtension = result?.source_language === "typescript" ? "ts" : result?.source_language === "javascript" ? "js" : "py";
   const sourceFileName = `source_under_test.${codeExtension}`;
+  const savedSourceFiles = result?.source_files && typeof result.source_files === "object" && !Array.isArray(result.source_files) ? Object.keys(result.source_files) : [];
+  const hasSourceBundle = savedSourceFiles.length > 0;
   const testCommand = codeExtension === "py" ? "python -m pytest test_generated.py" : `npx vitest run test_generated.test.${codeExtension}`;
   return <main className="app-shell">
     {sidebarOpen && <button className="sidebar-overlay" aria-label="Close suite history" onClick={() => { setSidebarOpen(false); historyToggleRef.current?.focus(); }} />}
@@ -460,24 +516,36 @@ function Workspace({ token, user, logout, onSessionExpired }) {
       {routeFailed && <div className="route-actions"><button type="button" onClick={() => setRouteVersion((version) => version + 1)}>Try again</button><Link to="/">Back to workspace</Link></div>}
       {showEditor && <section className="new-suite-view">
         {selectedProject && <p className="project-context"><Icon name="folder" size={15} />New suites will be saved to <strong>{selectedProject.name}</strong></p>}
-        <form ref={composerRef} className="composer" onSubmit={generate} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDrop={(event) => { if (!event.dataTransfer.files.length) return; event.preventDefault(); if (busy) return; const dropped = event.dataTransfer.files[0]; if (!/\.(json|ya?ml)$/i.test(dropped.name)) { setError("Attach an OpenAPI file in JSON or YAML format."); return; } setFile(dropped); setError(""); }}>
+        <form ref={composerRef} className="composer" onSubmit={generate} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDrop={(event) => { if (!event.dataTransfer.files.length) return; event.preventDefault(); if (busy) return; const dropped = Array.from(event.dataTransfer.files); if (dropped.every((item) => item.name.endsWith(".py"))) { addSourceFiles(dropped); return; } if (dropped.length !== 1 || !/\.(json|ya?ml)$/i.test(dropped[0].name)) { setError("Drop Python source files together, or one OpenAPI JSON or YAML file at a time."); return; } setFile(dropped[0]); setError(""); }}>
           <div className="composer-heading"><h2 ref={newSuiteHeadingRef} tabIndex={-1}>Test inputs</h2><span>Add either or both</span></div>
-          <input ref={fileInputRef} id="openapi-file" type="file" className="file-picker" aria-label="OpenAPI file" accept=".json,.yaml,.yml" disabled={loading} onChange={(event) => setFile(event.target.files?.[0] || null)} />
+          <input ref={fileInputRef} id="openapi-file" type="file" className="file-picker" aria-label="OpenAPI file" accept=".json,.yaml,.yml" disabled={busy} onChange={(event) => setFile(event.target.files?.[0] || null)} />
           <div className="input-section upload-section">
             <label className="input-label" htmlFor="openapi-file">API specification</label>
-            {file ? <div className="attachment"><Icon name="file" size={22} /><div className="attachment-info"><span>{file.name}</span><small>OpenAPI specification attached</small></div><button type="button" className="icon-button" aria-label="Remove file" disabled={loading} onClick={() => { setFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}><Icon name="close" size={17} /></button></div> : <button id="openapi-upload" type="button" className="upload-button" aria-label="Attach OpenAPI file" disabled={loading} onClick={() => fileInputRef.current?.click()}><span className="upload-icon"><Icon name="upload" size={23} /></span><span className="upload-copy"><strong>Upload an OpenAPI file</strong><span>Choose a JSON or YAML file, or drop it here</span></span><span className="upload-action">Browse files</span></button>}
+            {file ? <div className="attachment"><Icon name="file" size={22} /><div className="attachment-info"><span>{file.name}</span><small>OpenAPI specification attached</small></div><button type="button" className="icon-button" aria-label="Remove file" disabled={busy} onClick={() => { setFile(null); if (fileInputRef.current) fileInputRef.current.value = ""; }}><Icon name="close" size={17} /></button></div> : <button id="openapi-upload" type="button" className="upload-button" aria-label="Attach OpenAPI file" disabled={busy} onClick={() => fileInputRef.current?.click()}><span className="upload-icon"><Icon name="upload" size={23} /></span><span className="upload-copy"><strong>Upload an OpenAPI file</strong><span>Choose a JSON or YAML file, or drop it here</span></span><span className="upload-action">Browse files</span></button>}
           </div>
           <div className="input-section source-section">
             <div className="source-heading"><label className="input-label" htmlFor="source-code"><Icon name="code" size={17} />Source code</label>
-            <select className="language-select" aria-label="Source language" value={sourceLanguage} disabled={loading} onChange={(event) => setSourceLanguage(event.target.value)}>
+            <select className="language-select" aria-label="Source language" value={sourceLanguage} disabled={busy || sourceFiles.length > 0} onChange={(event) => setSourceLanguage(event.target.value)}>
               <option value="python">Python</option><option value="javascript">JavaScript</option><option value="typescript">TypeScript</option>
             </select>
             </div>
-            <textarea ref={sourceInputRef} id="source-code" className={sourceCode ? "with-code" : ""} value={sourceCode} disabled={loading} onChange={(event) => setSourceCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); composerRef.current?.requestSubmit(); } }} placeholder={`Paste ${sourceLanguage === "python" ? "Python" : sourceLanguage === "javascript" ? "JavaScript" : "TypeScript"} functions or classes to generate unit tests…`} rows={7} />
+            <textarea ref={sourceInputRef} id="source-code" className={sourceCode ? "with-code" : ""} value={sourceCode} disabled={busy || sourceFiles.length > 0} aria-describedby="source-files-hint" onChange={(event) => setSourceCode(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); composerRef.current?.requestSubmit(); } }} placeholder={`Paste ${sourceLanguage === "python" ? "Python" : sourceLanguage === "javascript" ? "JavaScript" : "TypeScript"} functions or classes to generate unit tests…`} rows={7} />
+            <div className="source-files-controls">
+              <input ref={sourceFilesInputRef} id="python-source-files" type="file" className="file-picker" aria-label="Python source files" accept=".py" multiple disabled={busy} onChange={(event) => { addSourceFiles(Array.from(event.target.files || [])); event.target.value = ""; }} />
+              <button type="button" className="source-files-button" disabled={busy} onClick={() => sourceFilesInputRef.current?.click()}><Icon name="upload" size={16} />{sourceFiles.length ? "Add Python files" : "Upload Python files instead"}</button>
+              <p id="source-files-hint" className="source-files-hint">{sourceFiles.length ? "Remove all Python files to paste code or change language." : "Use pasted code or Python files. Keep module filenames, such as helpers.py."} Up to 20 files, 128 KiB each and 512 KiB total; no folders.</p>
+              {sourceFiles.length > 0 && <>
+                <ul className="source-files-list" aria-label="Selected Python files">{sourceFiles.map((item) => <li key={item.name}><Icon name="file" size={16} /><span>{item.name}</span><small>{Math.ceil(item.size / 1024)} KiB</small><button type="button" className="icon-button" aria-label={`Remove ${item.name}`} disabled={busy} onClick={() => removeSourceFile(item.name)}><Icon name="close" size={15} /></button></li>)}</ul>
+                <div className="source-entrypoint"><label htmlFor="source-entrypoint">Module to test</label>
+                  <select id="source-entrypoint" value={sourceEntrypoint} disabled={busy} onChange={(event) => setSourceEntrypoint(event.target.value)}>{sourceFiles.map((item) => <option key={item.name} value={item.name}>{item.name}</option>)}</select>
+                </div>
+                <p className="source-files-hint">The other uploaded modules provide context for imports. Download the Python bundle to run the tests locally.</p>
+              </>}
+            </div>
           </div>
           <div className="composer-tools">
             {loading && <span className="generation-status" role="status">Generating…</span>}
-            <button className="generate-button" disabled={busy || (!file && !sourceCode.trim())} type="submit" aria-label={loading ? "Generating test suite" : sourceCode.trim() && !file ? "Generate unit tests" : "Generate test suite"} title="Generate tests (Ctrl+Enter)">{loading ? <span className="spinner" /> : <Icon name="play" size={17} />}<span>{loading ? "Generating…" : "Generate tests"}</span></button>
+            <button className="generate-button" disabled={busy || (!file && !sourceCode.trim() && !sourceFiles.length)} type="submit" aria-label={loading ? "Generating test suite" : (sourceCode.trim() || sourceFiles.length) && !file ? "Generate unit tests" : "Generate test suite"} title="Generate tests (Ctrl+Enter)">{loading ? <span className="spinner" /> : <Icon name="play" size={17} />}<span>{loading ? "Generating…" : "Generate tests"}</span></button>
           </div>
         </form>
         {error && <div className="error" ref={errorRef} role="alert" tabIndex={-1}>{error}</div>}
@@ -486,6 +554,7 @@ function Workspace({ token, user, logout, onSessionExpired }) {
       {result && <section key={result.id} className="results saved-results" ref={resultRef} tabIndex={-1} aria-labelledby="results-heading">
         <div className="results-top"><div><h2 id="results-heading">Generated tests</h2><p className="result-summary">{apiCases.length} API {apiCases.length === 1 ? "case" : "cases"} · {unitCases.length} unit {unitCases.length === 1 ? "case" : "cases"}{result.created_at ? ` · ${savedDate(result.created_at)}` : ""}</p></div>
           <div className="exports" aria-label="Download suite"><button onClick={() => downloadExport("json")}>JSON</button>
+            {hasSourceBundle && <button onClick={() => downloadExport("zip")}>Python bundle (.zip)</button>}
             {result.pytest_code?.trim() && <button onClick={() => downloadExport("py")}>Python</button>}
             {unitCode && codeExtension !== "py" && <button onClick={() => downloadExport(codeExtension)}>{codeExtension === "ts" ? "TypeScript" : "JavaScript"}</button>}
             <button onClick={() => downloadExport("csv")}>CSV</button>
@@ -493,11 +562,12 @@ function Workspace({ token, user, logout, onSessionExpired }) {
         </div>
         {unitCode && <div className="result-block">
           <div className="block-head"><h3>Generated unit test code</h3><div className="block-actions"><span>{result.unit_test_framework || "pytest"}</span><CopyButton text={unitCode} label="unit test code">Copy</CopyButton></div></div>
-          <details className="test-instructions"><summary>How to run these tests</summary><p>Save your original code as <code>{sourceFileName}</code> beside the downloaded test file{codeExtension !== "py" ? " and export the functions or classes under test" : ""}. Install {codeExtension === "py" ? "pytest" : "Vitest"} and your code’s dependencies, then run <code>{testCommand}</code>.</p></details>
+          {hasSourceBundle && <p className="source-bundle-context">Module under test: <code>{result.source_entrypoint}</code>. Included files: {savedSourceFiles.join(", ")}.</p>}
+          <details className="test-instructions"><summary>How to run these tests</summary>{hasSourceBundle ? <p>Download the Python bundle (.zip) and extract it. Keep the original module filenames beside <code>test_generated.py</code>. Install pytest and your code’s dependencies, then run <code>python -m pytest test_generated.py</code> from the extracted folder.</p> : <p>Save your original code as <code>{sourceFileName}</code> beside the downloaded test file{codeExtension !== "py" ? " and export the functions or classes under test" : ""}. Install {codeExtension === "py" ? "pytest" : "Vitest"} and your code’s dependencies, then run <code>{testCommand}</code>.</p>}</details>
           <pre aria-label="Generated unit test code">{unitCode}</pre>
         </div>}
         {apiCases.length > 0 && <div className="result-block"><div className="block-head"><h3>API / contract tests</h3><div className="block-actions"><span>{apiCases.length} {apiCases.length === 1 ? "case" : "cases"}</span><CopyButton text={JSON.stringify(apiCases, null, 2)} label="API test cases">Copy</CopyButton></div></div>
-          <details className="test-instructions"><summary>How to run downloaded API tests</summary><p>Download Python, then install pytest and httpx. Set <code>API_BASE_URL</code> to your API URL, including its path prefix, and optionally set <code>API_BEARER_TOKEN</code> or <code>API_HEADERS_JSON</code>. Run <code>python -m pytest test_generated.py</code>. Requests that change data require <code>API_ALLOW_MUTATIONS=true</code>.</p>{result.pytest_code?.trim() && <><div className="code-actions"><CopyButton text={result.pytest_code} label="API test code">Copy code</CopyButton></div><pre aria-label="Generated API test code">{result.pytest_code}</pre></>}</details>
+          <details className="test-instructions"><summary>How to run downloaded API tests</summary><p>{hasSourceBundle ? "Download and extract the Python bundle (.zip)" : "Download Python"}, then install pytest and httpx. Set <code>API_BASE_URL</code> to your API URL, including its path prefix, and optionally set <code>API_BEARER_TOKEN</code> or <code>API_HEADERS_JSON</code>. Run <code>python -m pytest test_generated.py</code>. Requests that change data require <code>API_ALLOW_MUTATIONS=true</code>.</p>{result.pytest_code?.trim() && <><div className="code-actions"><CopyButton text={result.pytest_code} label="API test code">Copy code</CopyButton></div><pre aria-label="Generated API test code">{result.pytest_code}</pre></>}</details>
           <pre aria-label="Generated API test cases">{JSON.stringify(apiCases, null, 2)}</pre></div>}
         {unitCases.length > 0 && <div className="result-block"><div className="block-head"><h3>Unit test cases</h3><div className="block-actions"><span>{unitCases.length} {unitCases.length === 1 ? "case" : "cases"}</span><CopyButton text={JSON.stringify(unitCases, null, 2)} label="unit test cases">Copy</CopyButton></div></div><pre aria-label="Generated unit test cases">{JSON.stringify(unitCases, null, 2)}</pre></div>}
       </section>}

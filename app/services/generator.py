@@ -7,13 +7,14 @@ from pydantic import ValidationError
 from app.schemas import GenerationResult, TestCase
 from app.services.api_tests import build_api_pytest_code
 from app.services.prompt_builder import build_generation_prompt, build_unit_test_repair_prompt
+from app.services.source_project import validate_source_project
 
 
 class JsonLLMClient(Protocol):
     def generate_json(self, prompt: str) -> dict[str, Any]: ...
 
 
-def _validate_unit_code(raw: Any, source_language: str) -> str:
+def _validate_unit_code(raw: Any, source_language: str, target_module: str = "source_under_test") -> str:
     if not isinstance(raw, str) or not raw.strip():
         raise RuntimeError("Gemini returned unit cases without runnable test code.")
     code = re.sub(r"^```(?:python|py|javascript|js|typescript|ts)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE).strip()
@@ -28,7 +29,7 @@ def _validate_unit_code(raw: Any, source_language: str) -> str:
         aliases = {
             name.asname or name.name
             for node in ast.walk(tree) if isinstance(node, ast.Import)
-            for name in node.names if name.name == "source_under_test"
+            for name in node.names if name.name == target_module
         }
         has_tests = any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_") for node in ast.walk(tree))
         calls_source = False
@@ -40,8 +41,13 @@ def _validate_unit_code(raw: Any, source_language: str) -> str:
                 if isinstance(target, ast.Name) and target.id in aliases:
                     calls_source = True
         if not has_tests or not calls_source:
-            raise RuntimeError("Gemini's tests did not call the source module.")
-        instructions = "# Save your original source as source_under_test.py beside this file.\n# Install pytest, then run: python -m pytest test_generated.py\n\n"
+            raise RuntimeError(f"Gemini's tests did not call the source module ({target_module}).")
+        source_instruction = (
+            "Save your original source as source_under_test.py beside this file."
+            if target_module == "source_under_test"
+            else f"Keep {target_module}.py and its companion source files beside this file."
+        )
+        instructions = f"# {source_instruction}\n# Install pytest, then run: python -m pytest test_generated.py\n\n"
     else:
         extension = "ts" if source_language == "typescript" else "js"
         if not re.search(r"from\s+['\"]\./source_under_test(?:\.(?:js|ts))?['\"]", code) or not re.search(r"\b(?:it|test)\s*(?:\.\w+\s*)?\(", code):
@@ -53,11 +59,12 @@ def _validate_unit_code(raw: Any, source_language: str) -> str:
 def _unit_code_with_repair(
     raw: dict[str, Any], unit_cases: list[TestCase], generation_prompt: str,
     source_language: str, llm_client: JsonLLMClient,
+    target_module: str = "source_under_test",
 ) -> str:
     code = raw.get("unit_test_code", raw.get("unit_pytest_code"))
     for _ in range(2):
         try:
-            return _validate_unit_code(code, source_language)
+            return _validate_unit_code(code, source_language, target_module)
         except RuntimeError as exc:
             repair_prompt = build_unit_test_repair_prompt(
                 generation_prompt, [case.model_dump() for case in unit_cases], code, str(exc)
@@ -70,7 +77,7 @@ def _unit_code_with_repair(
             raise RuntimeError("Gemini returned an invalid unit-test repair response. Please generate again.")
         code = repaired.get("unit_test_code", repaired.get("unit_pytest_code"))
     try:
-        return _validate_unit_code(code, source_language)
+        return _validate_unit_code(code, source_language, target_module)
     except RuntimeError as exc:
         raise RuntimeError(f"{exc} Automatic repair failed after 2 attempts. Please generate again.") from exc
 
@@ -100,21 +107,33 @@ def _parse_cases(raw: Any, key: str) -> list[TestCase]:
 
 
 def generate_test_cases(
-    swagger: dict[str, Any], source_code: str, llm_client: JsonLLMClient, source_language: str = "python"
+    swagger: dict[str, Any], source_code: str, llm_client: JsonLLMClient, source_language: str = "python",
+    source_files: dict[str, str] | None = None, source_entrypoint: str = "",
 ) -> GenerationResult:
     if not isinstance(swagger, dict):
         raise ValueError("Swagger document must be a JSON/YAML object")
-    if not swagger and not source_code.strip():
-        raise ValueError("Provide a Swagger/OpenAPI document or raw source code")
     if source_language not in ("python", "javascript", "typescript"):
         raise ValueError("Choose Python, JavaScript or TypeScript as the source language")
+    if source_files is not None:
+        if source_language != "python":
+            raise ValueError("Uploading multiple source files currently supports Python only")
+        if source_code.strip():
+            raise ValueError("Upload source files or paste source code, not both")
+        source_files, source_entrypoint = validate_source_project(source_files, source_entrypoint)
+    elif source_entrypoint:
+        raise ValueError("Upload Python source files before selecting an entry module")
+    has_source = bool(source_files) or bool(source_code.strip())
+    if not swagger and not has_source:
+        raise ValueError("Provide a Swagger/OpenAPI document, raw source code or Python source files")
     if source_code.strip() and source_language == "python":
         try:
             ast.parse(source_code)
         except SyntaxError as exc:
             raise ValueError(f"Python source has a syntax error at line {exc.lineno}: {exc.msg}. Check the code or select its language.") from exc
 
-    generation_prompt = build_generation_prompt(swagger, source_code, source_language)
+    generation_prompt = build_generation_prompt(
+        swagger, source_code, source_language, source_files, source_entrypoint
+    )
     raw = llm_client.generate_json(generation_prompt)
     if not isinstance(raw, dict):
         raise ValueError("Gemini returned an invalid response object")
@@ -127,14 +146,17 @@ def generate_test_cases(
     if not api_cases and not unit_cases:
         raise ValueError("Gemini returned no API or unit test cases")
     if not swagger and not unit_cases:
-        raise RuntimeError("Gemini did not return unit tests for the pasted code. Please generate again.")
+        raise RuntimeError("Gemini did not return unit tests for the provided source code. Please generate again.")
     if not swagger and api_cases:
         raise RuntimeError("Gemini returned API cases without a specification. Please generate unit tests again.")
-    if unit_cases and not source_code.strip():
+    if unit_cases and not has_source:
         raise RuntimeError("Gemini returned unit tests without source code. Please generate again.")
 
     api_code = build_api_pytest_code(api_cases, swagger) if api_cases else ""
-    unit_code = _unit_code_with_repair(raw, unit_cases, generation_prompt, source_language, llm_client) if unit_cases else ""
+    target_module = source_entrypoint[:-3] if source_files else "source_under_test"
+    unit_code = _unit_code_with_repair(
+        raw, unit_cases, generation_prompt, source_language, llm_client, target_module
+    ) if unit_cases else ""
     unit_python = unit_code if source_language == "python" else ""
     combined = "\n\n".join(part for part in (api_code, unit_python) if part)
     return GenerationResult(
@@ -146,4 +168,6 @@ def generate_test_cases(
         unit_test_code=unit_code,
         source_language=source_language,
         unit_test_framework=("pytest" if source_language == "python" else "Vitest") if unit_code else "",
+        source_files=source_files or {},
+        source_entrypoint=source_entrypoint,
     )

@@ -123,6 +123,17 @@ svg { flex-shrink: 0; }
 .source-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 11px; }
 .language-select { max-width: 150px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: #444444; font-size: 12px; cursor: pointer; }
 .language-select:hover { border-color: #aaaaaa; }
+.source-files-controls { margin-top: 14px; }
+.source-files-button { display: inline-flex; align-items: center; gap: 7px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: #444444; font-size: 12px; }
+.source-files-button:hover:not(:disabled) { border-color: #aaaaaa; }
+.source-files-hint, .source-bundle-context { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.source-bundle-context { margin: 0 0 12px; }
+.source-files-list { display: grid; gap: 6px; margin: 12px 0; padding: 0; list-style: none; }
+.source-files-list li { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 5px; font-size: 12px; }
+.source-files-list li > span { min-width: 0; overflow-wrap: anywhere; }
+.source-files-list li > small { margin-left: auto; color: var(--muted); white-space: nowrap; }
+.source-entrypoint { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; font-weight: 600; }
+.source-entrypoint select { min-width: 0; max-width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: #444444; font: inherit; }
 .composer textarea { display: block; width: 100%; min-height: 178px; max-height: 320px; padding: 16px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; background: #fafafa; color: #222222; font: 13px/1.8 Consolas, "SFMono-Regular", monospace; overflow-y: auto; tab-size: 4; }
 .composer textarea:focus { border-color: #777777; }
 .composer textarea::placeholder { color: #777777; opacity: 1; }
